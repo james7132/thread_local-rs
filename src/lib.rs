@@ -521,6 +521,20 @@ unsafe fn deallocate_bucket<T>(bucket: *mut Entry<T>, size: usize) {
     let _ = Box::from_raw(std::slice::from_raw_parts_mut(bucket, size));
 }
 
+/// ```compile_fail
+/// fn foo<T: Send>() {}
+/// foo::<ThreadLocal<Rc<String>>();
+/// ```
+#[allow(dead_code)]
+fn is_not_send_if_value_is_not_send() {}
+
+/// ```compile_fail
+/// fn foo<T: Sync>() {}
+/// foo::<ThreadLocal<Rc<String>>();
+/// ```
+#[allow(dead_code)]
+fn is_not_sync_if_value_is_not_send() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
