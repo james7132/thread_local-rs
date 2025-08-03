@@ -100,7 +100,7 @@ const BUCKETS: usize = (POINTER_WIDTH - 1) as usize;
 /// Thread-local variable wrapper
 ///
 /// See the [module-level documentation](index.html) for more.
-pub struct ThreadLocal<T: Send> {
+pub struct ThreadLocal<T> {
     /// The buckets in the thread local. The nth bucket contains `2^n`
     /// elements. Each bucket is lazily allocated.
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
@@ -128,13 +128,13 @@ impl<T> Drop for Entry<T> {
 // ThreadLocal is always Sync, even if T isn't
 unsafe impl<T: Send> Sync for ThreadLocal<T> {}
 
-impl<T: Send> Default for ThreadLocal<T> {
+impl<T> Default for ThreadLocal<T> {
     fn default() -> ThreadLocal<T> {
         ThreadLocal::new()
     }
 }
 
-impl<T: Send> Drop for ThreadLocal<T> {
+impl<T> Drop for ThreadLocal<T> {
     fn drop(&mut self) {
         // Free each non-null bucket
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
@@ -151,7 +151,9 @@ impl<T: Send> Drop for ThreadLocal<T> {
     }
 }
 
-impl<T: Send> ThreadLocal<T> {
+// For all T: !Send, ThreadLocal can be constructed but never have items inserted or
+// retrieved from them.
+impl<T> ThreadLocal<T> {
     /// Creates a new empty `ThreadLocal`.
     pub const fn new() -> ThreadLocal<T> {
         let buckets = [ptr::null_mut::<Entry<T>>(); BUCKETS];
@@ -180,11 +182,53 @@ impl<T: Send> ThreadLocal<T> {
         }
     }
 
+    /// Acquires a reference to the value in this thread-local store.
+    pub fn with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(Option<&T>) -> R,
+    {
+        match thread_id::try_get() {
+            Some(id) => f(self.get_inner(id)),
+            None => f(None),
+        }
+    }
+
+    fn get_inner(&self, thread: Thread) -> Option<&T> {
+        let bucket_ptr =
+            unsafe { self.buckets.get_unchecked(thread.bucket) }.load(Ordering::Acquire);
+        if bucket_ptr.is_null() {
+            return None;
+        }
+        unsafe {
+            let entry = &*bucket_ptr.add(thread.index);
+            if entry.present.load(Ordering::Relaxed) {
+                Some(&*(&*entry.value.get()).as_ptr())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl<T: Sync> ThreadLocal<T> {
     /// Returns the element for the current thread, if it exists.
     pub fn get(&self) -> Option<&T> {
         thread_id::try_get().and_then(|id| self.get_inner(id))
     }
 
+    /// Returns an iterator over the local values of all threads in unspecified
+    /// order.
+    ///
+    /// This call can be done safely, as `T` is required to implement [`Sync`].
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter {
+            thread_local: self,
+            raw: RawIter::new(),
+        }
+    }
+}
+
+impl<T: Send> ThreadLocal<T> {
     /// Returns the element for the current thread, or creates it if it doesn't
     /// exist.
     pub fn get_or<F>(&self, create: F) -> &T
@@ -210,22 +254,6 @@ impl<T: Send> ThreadLocal<T> {
         }
 
         Ok(self.insert(thread, create()?))
-    }
-
-    fn get_inner(&self, thread: Thread) -> Option<&T> {
-        let bucket_ptr =
-            unsafe { self.buckets.get_unchecked(thread.bucket) }.load(Ordering::Acquire);
-        if bucket_ptr.is_null() {
-            return None;
-        }
-        unsafe {
-            let entry = &*bucket_ptr.add(thread.index);
-            if entry.present.load(Ordering::Relaxed) {
-                Some(&*(&*entry.value.get()).as_ptr())
-            } else {
-                None
-            }
-        }
     }
 
     #[cold]
@@ -267,20 +295,6 @@ impl<T: Send> ThreadLocal<T> {
         unsafe { &*(&*value_ptr).as_ptr() }
     }
 
-    /// Returns an iterator over the local values of all threads in unspecified
-    /// order.
-    ///
-    /// This call can be done safely, as `T` is required to implement [`Sync`].
-    pub fn iter(&self) -> Iter<'_, T>
-    where
-        T: Sync,
-    {
-        Iter {
-            thread_local: self,
-            raw: RawIter::new(),
-        }
-    }
-
     /// Returns a mutable iterator over the local values of all threads in
     /// unspecified order.
     ///
@@ -305,7 +319,24 @@ impl<T: Send> ThreadLocal<T> {
     }
 }
 
-impl<T: Send> IntoIterator for ThreadLocal<T> {
+impl<T: Send + Default> ThreadLocal<T> {
+    /// Returns the element for the current thread, or creates a default one if
+    /// it doesn't exist.
+    pub fn get_or_default(&self) -> &T {
+        self.get_or(Default::default)
+    }
+
+    /// Returns the element for the current thread, or creates a default one if
+    /// it doesn't exist.
+    pub fn with_default<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&T) -> R,
+    {
+        f(self.get_or_default())
+    }
+}
+
+impl<T> IntoIterator for ThreadLocal<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -317,7 +348,7 @@ impl<T: Send> IntoIterator for ThreadLocal<T> {
     }
 }
 
-impl<'a, T: Send + Sync> IntoIterator for &'a ThreadLocal<T> {
+impl<'a, T: Sync> IntoIterator for &'a ThreadLocal<T> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T>;
 
@@ -335,17 +366,9 @@ impl<'a, T: Send> IntoIterator for &'a mut ThreadLocal<T> {
     }
 }
 
-impl<T: Send + Default> ThreadLocal<T> {
-    /// Returns the element for the current thread, or creates a default one if
-    /// it doesn't exist.
-    pub fn get_or_default(&self) -> &T {
-        self.get_or(Default::default)
-    }
-}
-
-impl<T: Send + fmt::Debug> fmt::Debug for ThreadLocal<T> {
+impl<T: fmt::Debug> fmt::Debug for ThreadLocal<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ThreadLocal {{ local_data: {:?} }}", self.get())
+        self.with(|tls| write!(f, "ThreadLocal {{ local_data: {:?} }}", tls))
     }
 }
 
@@ -358,6 +381,7 @@ struct RawIter {
     bucket_size: usize,
     index: usize,
 }
+
 impl RawIter {
     #[inline]
     fn new() -> Self {
@@ -369,7 +393,7 @@ impl RawIter {
         }
     }
 
-    fn next<'a, T: Send + Sync>(&mut self, thread_local: &'a ThreadLocal<T>) -> Option<&'a T> {
+    fn next<'a, T: Sync>(&mut self, thread_local: &'a ThreadLocal<T>) -> Option<&'a T> {
         while self.bucket < BUCKETS {
             let bucket = unsafe { thread_local.buckets.get_unchecked(self.bucket) };
             let bucket = bucket.load(Ordering::Acquire);
@@ -389,7 +413,8 @@ impl RawIter {
         }
         None
     }
-    fn next_mut<'a, T: Send>(
+
+    fn next_mut<'a, T>(
         &mut self,
         thread_local: &'a mut ThreadLocal<T>,
     ) -> Option<&'a mut Entry<T>> {
@@ -423,11 +448,12 @@ impl RawIter {
         self.index = 0;
     }
 
-    fn size_hint<T: Send>(&self, thread_local: &ThreadLocal<T>) -> (usize, Option<usize>) {
+    fn size_hint<T>(&self, thread_local: &ThreadLocal<T>) -> (usize, Option<usize>) {
         let total = thread_local.values.load(Ordering::Acquire);
         (total - self.yielded, None)
     }
-    fn size_hint_frozen<T: Send>(&self, thread_local: &ThreadLocal<T>) -> (usize, Option<usize>) {
+
+    fn size_hint_frozen<T>(&self, thread_local: &ThreadLocal<T>) -> (usize, Option<usize>) {
         let total = unsafe { *(&thread_local.values as *const AtomicUsize as *const usize) };
         let remaining = total - self.yielded;
         (remaining, Some(remaining))
@@ -436,12 +462,12 @@ impl RawIter {
 
 /// Iterator over the contents of a `ThreadLocal`.
 #[derive(Debug)]
-pub struct Iter<'a, T: Send + Sync> {
+pub struct Iter<'a, T> {
     thread_local: &'a ThreadLocal<T>,
     raw: RawIter,
 }
 
-impl<'a, T: Send + Sync> Iterator for Iter<'a, T> {
+impl<'a, T: Sync> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
         self.raw.next(self.thread_local)
@@ -450,21 +476,24 @@ impl<'a, T: Send + Sync> Iterator for Iter<'a, T> {
         self.raw.size_hint(self.thread_local)
     }
 }
+
 impl<T: Send + Sync> FusedIterator for Iter<'_, T> {}
 
 /// Mutable iterator over the contents of a `ThreadLocal`.
-pub struct IterMut<'a, T: Send> {
+pub struct IterMut<'a, T> {
     thread_local: &'a mut ThreadLocal<T>,
     raw: RawIter,
 }
 
 impl<'a, T: Send> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
+
     fn next(&mut self) -> Option<&'a mut T> {
         self.raw
             .next_mut(self.thread_local)
             .map(|entry| unsafe { &mut *(&mut *entry.value.get()).as_mut_ptr() })
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.raw.size_hint_frozen(self.thread_local)
     }
@@ -475,7 +504,7 @@ impl<T: Send> FusedIterator for IterMut<'_, T> {}
 
 // Manual impl so we don't call Debug on the ThreadLocal, as doing so would create a reference to
 // this thread's value that potentially aliases with a mutable reference we have given out.
-impl<'a, T: Send + fmt::Debug> fmt::Debug for IterMut<'a, T> {
+impl<'a, T> fmt::Debug for IterMut<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IterMut").field("raw", &self.raw).finish()
     }
@@ -483,13 +512,14 @@ impl<'a, T: Send + fmt::Debug> fmt::Debug for IterMut<'a, T> {
 
 /// An iterator that moves out of a `ThreadLocal`.
 #[derive(Debug)]
-pub struct IntoIter<T: Send> {
+pub struct IntoIter<T> {
     thread_local: ThreadLocal<T>,
     raw: RawIter,
 }
 
-impl<T: Send> Iterator for IntoIter<T> {
+impl<T> Iterator for IntoIter<T> {
     type Item = T;
+
     fn next(&mut self) -> Option<T> {
         self.raw.next_mut(&mut self.thread_local).map(|entry| {
             *entry.present.get_mut() = false;
@@ -498,6 +528,7 @@ impl<T: Send> Iterator for IntoIter<T> {
             }
         })
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.raw.size_hint_frozen(&self.thread_local)
     }

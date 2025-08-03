@@ -10,17 +10,17 @@ use std::usize;
 /// This used to add a fast path for a single thread, however that has been
 /// obsoleted by performance improvements to [`ThreadLocal`] itself.
 #[deprecated(since = "1.1.0", note = "Use `ThreadLocal` instead")]
-pub struct CachedThreadLocal<T: Send> {
+pub struct CachedThreadLocal<T> {
     inner: ThreadLocal<T>,
 }
 
-impl<T: Send> Default for CachedThreadLocal<T> {
+impl<T> Default for CachedThreadLocal<T> {
     fn default() -> CachedThreadLocal<T> {
         CachedThreadLocal::new()
     }
 }
 
-impl<T: Send> CachedThreadLocal<T> {
+impl<T> CachedThreadLocal<T> {
     /// Creates a new empty `CachedThreadLocal`.
     #[inline]
     pub fn new() -> CachedThreadLocal<T> {
@@ -28,13 +28,17 @@ impl<T: Send> CachedThreadLocal<T> {
             inner: ThreadLocal::new(),
         }
     }
+}
 
+impl<T: Sync> CachedThreadLocal<T> {
     /// Returns the element for the current thread, if it exists.
     #[inline]
     pub fn get(&self) -> Option<&T> {
         self.inner.get()
     }
+}
 
+impl<T: Send> CachedThreadLocal<T> {
     /// Returns the element for the current thread, or creates it if it doesn't
     /// exist.
     #[inline]
@@ -80,7 +84,7 @@ impl<T: Send> CachedThreadLocal<T> {
     }
 }
 
-impl<T: Send> IntoIterator for CachedThreadLocal<T> {
+impl<T> IntoIterator for CachedThreadLocal<T> {
     type Item = T;
     type IntoIter = CachedIntoIter<T>;
 
@@ -108,7 +112,7 @@ impl<T: Send + Default> CachedThreadLocal<T> {
     }
 }
 
-impl<T: Send + fmt::Debug> fmt::Debug for CachedThreadLocal<T> {
+impl<T: Sync + fmt::Debug> fmt::Debug for CachedThreadLocal<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ThreadLocal {{ local_data: {:?} }}", self.get())
     }
@@ -140,11 +144,11 @@ impl<'a, T: Send + 'a> ExactSizeIterator for CachedIterMut<'a, T> {}
 
 /// An iterator that moves out of a `CachedThreadLocal`.
 #[deprecated(since = "1.1.0", note = "Use `IntoIter` instead")]
-pub struct CachedIntoIter<T: Send> {
+pub struct CachedIntoIter<T> {
     inner: IntoIter<T>,
 }
 
-impl<T: Send> Iterator for CachedIntoIter<T> {
+impl<T> Iterator for CachedIntoIter<T> {
     type Item = T;
 
     #[inline]
@@ -158,4 +162,4 @@ impl<T: Send> Iterator for CachedIntoIter<T> {
     }
 }
 
-impl<T: Send> ExactSizeIterator for CachedIntoIter<T> {}
+impl<T> ExactSizeIterator for CachedIntoIter<T> {}
