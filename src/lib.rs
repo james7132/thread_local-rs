@@ -65,6 +65,15 @@
 #![warn(missing_docs)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 #![warn(unsafe_op_in_unsafe_fn)]
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::panic_in_result_fn,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 #![cfg_attr(feature = "nightly", feature(thread_local))]
 
 mod cached;

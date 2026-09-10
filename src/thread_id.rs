@@ -103,7 +103,10 @@ cfg_if::cfg_if! {
                 unsafe {
                     THREAD = None;
                 }
-                THREAD_ID_MANAGER.lock().unwrap().free(self.id.get());
+                THREAD_ID_MANAGER
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .free(self.id.get());
             }
         }
 
@@ -127,7 +130,11 @@ cfg_if::cfg_if! {
         /// Out-of-line slow path for allocating a thread ID.
         #[cold]
          fn get_slow() -> Thread {
-            let new = Thread::new(THREAD_ID_MANAGER.lock().unwrap().alloc());
+            let id = THREAD_ID_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .alloc();
+            let new = Thread::new(id);
             unsafe {
                 THREAD = Some(new);
             }
@@ -156,7 +163,10 @@ cfg_if::cfg_if! {
                 // will go through get_slow which will either panic or
                 // initialize a new ThreadGuard.
                 let _ = THREAD.try_with(|thread| thread.set(None));
-                THREAD_ID_MANAGER.lock().unwrap().free(self.id.get());
+                THREAD_ID_MANAGER
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .free(self.id.get());
             }
         }
 
@@ -182,7 +192,11 @@ cfg_if::cfg_if! {
         /// Out-of-line slow path for allocating a thread ID.
         #[cold]
         fn get_slow(thread: &Cell<Option<Thread>>) -> Thread {
-            let new = Thread::new(THREAD_ID_MANAGER.lock().unwrap().alloc());
+            let id = THREAD_ID_MANAGER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .alloc();
+            let new = Thread::new(id);
             thread.set(Some(new));
             THREAD_GUARD.with(|guard| guard.id.set(new.id()));
             new
